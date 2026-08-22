@@ -1,159 +1,145 @@
-// db.js — IndexedDB. Cinco almacenes: tarjetas, programacion, intentos, pasajes, config.
-const NOMBRE = 'ingles';
+/* Base local del celular (IndexedDB) — Ventas en Ruta / Quesos Cerinza
+   Todo vive aquí: la app funciona sin señal y solo sale a internet
+   cuando el vendedor comparte el cierre del día. */
+
+const NOMBRE = 'cerinza_ruta';
 const VERSION = 1;
+
+const TIENDAS = {
+  ajustes: { keyPath: 'clave' },
+  productos: { keyPath: 'id' },   // id = codigo|nombre — QC059 lo comparten varios yogures
+  clientes_pc: { keyPath: 'id', autoIncrement: true },   // los que ya existen en el PC
+  clientes_nuevos: { keyPath: 'uuid' },                  // capturados en la calle
+  carga: { keyPath: 'fecha' },                           // lo que se lleva por día
+  ventas: { keyPath: 'uuid' }
+};
+
 let _db = null;
-
-export function uuid() {
-  if (crypto.randomUUID) return crypto.randomUUID();
-  return 'x-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
-}
-
-export function hoy() {
-  const d = new Date();
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-}
-
-export function dias(n) {
-  return hoy() + n * 86400000;
-}
 
 export function abrir() {
   if (_db) return Promise.resolve(_db);
-  return new Promise((res, rej) => {
+  return new Promise((ok, mal) => {
     const req = indexedDB.open(NOMBRE, VERSION);
-    req.onupgradeneeded = (e) => {
-      const db = e.target.result;
-
-      if (!db.objectStoreNames.contains('tarjetas')) {
-        const s = db.createObjectStore('tarjetas', { keyPath: 'id' });
-        s.createIndex('tipo', 'tipo');
-        s.createIndex('notaId', 'notaId');
-        s.createIndex('pasajeId', 'carga.pasajeId');
-      }
-      if (!db.objectStoreNames.contains('programacion')) {
-        const s = db.createObjectStore('programacion', { keyPath: 'tarjetaId' });
-        s.createIndex('vence', 'vence');
-      }
-      if (!db.objectStoreNames.contains('intentos')) {
-        const s = db.createObjectStore('intentos', { keyPath: 'id', autoIncrement: true });
-        s.createIndex('tarjetaId', 'tarjetaId');
-        s.createIndex('fecha', 'fecha');
-      }
-      if (!db.objectStoreNames.contains('pasajes')) {
-        db.createObjectStore('pasajes', { keyPath: 'id' });
-      }
-      if (!db.objectStoreNames.contains('config')) {
-        db.createObjectStore('config', { keyPath: 'clave' });
+    req.onupgradeneeded = ev => {
+      const db = ev.target.result;
+      for (const [nombre, opts] of Object.entries(TIENDAS)) {
+        if (!db.objectStoreNames.contains(nombre)) {
+          const t = db.createObjectStore(nombre, opts);
+          if (nombre === 'ventas') t.createIndex('fecha', 'fecha');
+        }
       }
     };
-    req.onsuccess = () => { _db = req.result; res(_db); };
-    req.onerror = () => rej(req.error);
+    req.onsuccess = () => { _db = req.result; ok(_db); };
+    req.onerror = () => mal(req.error);
   });
 }
 
-function tx(almacen, modo) {
-  return abrir().then((db) => db.transaction(almacen, modo).objectStore(almacen));
+function tx(tienda, modo = 'readonly') {
+  return abrir().then(db => db.transaction(tienda, modo).objectStore(tienda));
+}
+const promesa = req => new Promise((ok, mal) => {
+  req.onsuccess = () => ok(req.result);
+  req.onerror = () => mal(req.error);
+});
+
+export const todos = tienda => tx(tienda).then(t => promesa(t.getAll()));
+export const obtener = (tienda, clave) => tx(tienda).then(t => promesa(t.get(clave)));
+export const guardar = (tienda, valor) => tx(tienda, 'readwrite').then(t => promesa(t.put(valor)));
+export const borrar = (tienda, clave) => tx(tienda, 'readwrite').then(t => promesa(t.delete(clave)));
+export const vaciar = tienda => tx(tienda, 'readwrite').then(t => promesa(t.clear()));
+
+export async function guardarVarios(tienda, lista) {
+  const t = await tx(tienda, 'readwrite');
+  await Promise.all(lista.map(v => promesa(t.put(v))));
+  return lista.length;
 }
 
-function pedir(req) {
-  return new Promise((res, rej) => {
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
-  });
+/* ---------- Ajustes ---------- */
+const AJUSTES_POR_DEFECTO = {
+  dispositivo: '',            // M1, M2, M3 — se configura una sola vez por celular
+  vendedor: '',
+  consecutivo: 0,
+  codepage: '0',
+  empresa_nombre: 'QUESOS CERINZA',
+  empresa_nit: '',
+  empresa_tel: '',
+  empresa_lugar: 'Cerinza - Boyacá',
+  impresora_id: '',
+  seed_fecha: ''
+};
+
+export async function ajustes() {
+  const filas = await todos('ajustes');
+  const mapa = { ...AJUSTES_POR_DEFECTO };
+  for (const f of filas) mapa[f.clave] = f.valor;
+  return mapa;
+}
+export const ajustar = (clave, valor) => guardar('ajustes', { clave, valor });
+
+/* ---------- Numeración: serie propia por celular, nunca choca con la del PC ---------- */
+export async function siguienteNumero() {
+  const a = await ajustes();
+  const n = (Number(a.consecutivo) || 0) + 1;
+  await ajustar('consecutivo', n);
+  return `${a.dispositivo || 'M?'}-${String(n).padStart(3, '0')}`;
 }
 
-export async function poner(almacen, valor) {
-  const s = await tx(almacen, 'readwrite');
-  return pedir(s.put(valor));
+/* ---------- Semilla que viene del PC ---------- */
+export async function cargarSemilla(datos) {
+  if (datos.formato !== 'cerinza-seed-v1') {
+    throw new Error('El archivo no es una semilla de Remisiones (falta cerinza-seed-v1).');
+  }
+  await vaciar('productos');
+  await vaciar('clientes_pc');
+  // El código NO es único (QC059 = los 4 yogures): la llave es codigo + nombre
+  await guardarVarios('productos', (datos.productos || []).map(p => ({
+    ...p, id: `${p.codigo || ''}|${p.nombre}`
+  })));
+  await guardarVarios('clientes_pc', (datos.clientes || []).map(c =>
+    typeof c === 'string' ? { nombre: c } : c
+  ));
+  await ajustar('pueblos', datos.pueblos || []);
+  await ajustar('dias_ruta', datos.dias_ruta || []);
+  await ajustar('seed_fecha', datos.generado || new Date().toISOString());
+  return {
+    productos: (datos.productos || []).length,
+    clientes: (datos.clientes || []).length
+  };
 }
 
-export async function ponerVarios(almacen, valores) {
-  const db = await abrir();
-  return new Promise((res, rej) => {
-    const t = db.transaction(almacen, 'readwrite');
-    const s = t.objectStore(almacen);
-    valores.forEach((v) => s.put(v));
-    t.oncomplete = () => res(valores.length);
-    t.onerror = () => rej(t.error);
-  });
+/* ---------- Consultas del día ---------- */
+export async function ventasDe(fecha) {
+  const t = await tx('ventas');
+  const todas = await promesa(t.index('fecha').getAll(fecha));
+  return todas.sort((a, b) => a.creada.localeCompare(b.creada));
 }
 
-export async function obtener(almacen, clave) {
-  const s = await tx(almacen, 'readonly');
-  return pedir(s.get(clave));
+export async function cargaDe(fecha) {
+  return (await obtener('carga', fecha)) || { fecha, items: [] };
 }
 
-export async function todos(almacen) {
-  const s = await tx(almacen, 'readonly');
-  return pedir(s.getAll());
-}
+/**
+ * Cuadre del queso extra: lo que se llevó, lo que se vendió y lo que debe volver.
+ * Sin esto el inventario del PC queda descuadrado.
+ */
+export async function cuadre(fecha) {
+  const carga = await cargaDe(fecha);
+  const ventas = (await ventasDe(fecha)).filter(v => !v.anulada);
+  const vendido = new Map();
+  for (const v of ventas)
+    for (const it of v.items)
+      vendido.set(it.id, (vendido.get(it.id) || 0) + it.cant);
 
-export async function borrar(almacen, clave) {
-  const s = await tx(almacen, 'readwrite');
-  return pedir(s.delete(clave));
-}
-
-export async function porIndice(almacen, indice, valor) {
-  const s = await tx(almacen, 'readonly');
-  return pedir(s.index(indice).getAll(valor));
-}
-
-// Tarjetas cuya fecha de vencimiento ya llegó, con su tarjeta unida.
-// Dos transacciones separadas a propósito: mezclar await con una sola
-// transacción de IndexedDB la cierra sola en algunos navegadores.
-export async function vencidas(limite = 40) {
-  const s = await tx('programacion', 'readonly');
-  const prog = await pedir(s.index('vence').getAll(IDBKeyRange.upperBound(hoy())));
-  prog.sort((a, b) => a.vence - b.vence || a.intervalo - b.intervalo);
-  const corte = prog.slice(0, limite);
-  const st = await tx('tarjetas', 'readonly');
-  const tarjetas = await Promise.all(corte.map((p) => pedir(st.get(p.tarjetaId))));
-  return corte
-    .map((p, i) => ({ tarjeta: tarjetas[i], prog: p }))
-    .filter((x) => x.tarjeta);
-}
-
-export async function registrarIntento(intento) {
-  const s = await tx('intentos', 'readwrite');
-  return pedir(s.add(intento));
-}
-
-// Los últimos fallos, en texto plano. Es lo que se le pasa al modelo
-// para que las tarjetas nuevas apunten a lo que de verdad se te dificulta.
-export async function ultimosFallos(n = 20) {
-  const si = await tx('intentos', 'readonly');
-  const todosInt = await pedir(si.index('fecha').getAll());
-  const malos = todosInt.filter((i) => i.nota < 3).slice(-n).reverse();
-  const st = await tx('tarjetas', 'readonly');
-  const tarjetas = await Promise.all(malos.map((i) => pedir(st.get(i.tarjetaId))));
-  return malos
-    .map((i, k) => (tarjetas[k] ? { tipo: tarjetas[k].tipo, carga: tarjetas[k].carga, respuesta: i.respuesta } : null))
-    .filter(Boolean);
-}
-
-export async function leerConfig(clave, porDefecto = null) {
-  const v = await obtener('config', clave);
-  return v === undefined || v === null ? porDefecto : v.valor;
-}
-
-export async function guardarConfig(clave, valor) {
-  return poner('config', { clave, valor });
-}
-
-export async function exportarTodo() {
-  const [tarjetas, programacion, intentos, pasajes] = await Promise.all([
-    todos('tarjetas'), todos('programacion'), todos('intentos'), todos('pasajes'),
-  ]);
-  return { formato: 'ingles-v1', fecha: new Date().toISOString(), tarjetas, programacion, intentos, pasajes };
-}
-
-export async function importarTodo(datos) {
-  if (datos.formato !== 'ingles-v1') throw new Error('Formato no reconocido');
-  await ponerVarios('pasajes', datos.pasajes || []);
-  await ponerVarios('tarjetas', datos.tarjetas || []);
-  await ponerVarios('programacion', datos.programacion || []);
-  // Los intentos llevan id autoincremental: se reinsertan sin id para no chocar.
-  const s = await tx('intentos', 'readwrite');
-  (datos.intentos || []).forEach((i) => { const { id, ...resto } = i; s.add(resto); });
-  return true;
+  const filas = [];
+  for (const c of carga.items) {
+    const vend = vendido.get(c.id) || 0;
+    filas.push({ id: c.id, codigo: c.codigo, nombre: c.nombre, cargado: c.cant, vendido: vend, sobrante: c.cant - vend });
+    vendido.delete(c.id);
+  }
+  // Vendido sin haberse cargado: descuadre que hay que revisar antes de cerrar
+  for (const [id, vend] of vendido) {
+    const it = ventas.flatMap(v => v.items).find(i => i.id === id);
+    filas.push({ id, codigo: it?.codigo || '', nombre: it?.nombre || id, cargado: 0, vendido: vend, sobrante: -vend, alerta: true });
+  }
+  return filas;
 }

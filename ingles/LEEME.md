@@ -1,68 +1,93 @@
-# Repaso de inglés
+# Ventas en Ruta — Quesos Cerinza
 
-PWA personal de repaso espaciado. JS puro, sin framework ni compilación —
-igual que `ventas-ruta`. Se publica en GitHub Pages y se instala desde Chrome
-en Android.
+App del celular para que los vendedores de ruta le vendan a clientes nuevos,
+impriman la remisión en la PT-210 y manden todo al PC al final del día.
 
-## Publicar
+Funciona sin señal. Solo necesita internet para abrirse la primera vez
+y para mandar el cierre por WhatsApp.
 
-```bash
-git init && git add . && git commit -m "primera versión"
-git remote add origin git@github.com:USUARIO/ingles.git
-git push -u origin main
+---
+
+## 1. Subirla a GitHub Pages
+
+Web Bluetooth exige `https://`. Un archivo abierto directo en el celular no sirve.
+
+1. Cree un repositorio nuevo, por ejemplo `ventas-ruta`.
+2. Suba **todo el contenido de esta carpeta** a la raíz del repositorio
+   (`index.html` tiene que quedar arriba, no dentro de otra carpeta).
+3. En el repositorio: **Settings → Pages → Source: Deploy from a branch → main → / (root)**.
+4. A los dos minutos queda en `https://SU-USUARIO.github.io/ventas-ruta/`.
+
+Para actualizar después: sube los archivos nuevos y listo. Los celulares
+recogen la versión nueva la próxima vez que abran con señal.
+
+## 2. Instalarla en el celular
+
+Abrir esa dirección en **Chrome de Android** → menú de los tres puntos →
+*Instalar aplicación* / *Agregar a pantalla de inicio*. Queda con ícono propio.
+
+> En iPhone no funciona: Safari no tiene Web Bluetooth. Tiene que ser Android.
+
+## 3. Configurar cada celular (una sola vez)
+
+En **Ajustes**:
+
+- **Número del celular**: `M1` en el primero, `M2` en el segundo, `M3` en el tercero.
+  Esto es lo que evita que dos vendedores generen la misma remisión.
+  La numeración queda `M1-001`, `M1-002`… y nunca choca con las `L1001`
+  del PC.
+- **Nombre del vendedor**, NIT, teléfono y ubicación de la empresa.
+- **Cargar archivo generado en el PC**: el `semilla_*.json` con productos y
+  clientes. Sin esto la app no tiene qué vender.
+  Para probar de una, use el `semilla_ejemplo.json` que viene aquí.
+
+## 4. Generar la semilla desde el PC
+
+Copie `pc/generar_semilla.py` a la carpeta de la app de Remisiones
+(donde está `remisiones.db`) y corra:
+
+```
+python generar_semilla.py
 ```
 
-En el repositorio: **Settings → Pages → Source: Deploy from a branch → main / (root)**.
-Queda en `https://USUARIO.github.io/ingles/`. Ábrela en Chrome de Android y
-*Agregar a pantalla de inicio*.
+Deja un `semilla_AAAA-MM-DD.json` que se manda por WhatsApp a los celulares.
+Cuando esté probado lo pasamos a un botón dentro de la pestaña Configuración.
 
-Ojo: si haces el repositorio público, la clave de API **no** va en el código.
-Se escribe en Ajustes y vive en IndexedDB, en el celular.
+## 5. El día del vendedor
 
-## Cómo está armado
+1. **Carga** — anota cuánto producto adicional lleva.
+2. **Vender** — nombre del cliente (avisa si ya existe uno parecido),
+   productos, forma de pago, *Guardar e imprimir*.
+3. **Hoy** — ve sus ventas, el total, y el cuadre de lo que le sobra.
+4. **Cerrar y enviar al PC** — sale el selector de WhatsApp con el archivo
+   `cierre_M1_AAAA-MM-DD.json` adjunto.
 
-```
-index.html            cuatro vistas: repasar, agregar, progreso, ajustes
-css/estilo.css        papel y tinta; azul para el inglés, vino para el español
-js/db.js              IndexedDB: tarjetas, programacion, intentos, pasajes, config
-js/srs.js             SM-2. No sabe qué hay dentro de una tarjeta
-js/llm.js             genera tarjetas, valida gramática, califica speaking
-js/voz.js             TTS y reconocimiento de voz del celular
-js/app.js             sesión, generación, progreso, ajustes
-sw.js                 cache del armazón para abrir sin datos
-```
+---
 
-La separación importante: **`srs.js` nunca mira dentro de `carga`.** Pide las
-tarjetas vencidas y devuelve la siguiente fecha. Por eso agregar un quinto tipo
-de tarjeta no toca el algoritmo.
+## Detalles que importan
 
-### Los cuatro tipos
+**Numeración.** Cada celular lleva su propio consecutivo. Si se reinstala la
+app en un celular hay que volver a poner el consecutivo donde iba, o va a
+repetir números.
 
-| tipo | `carga` |
-|---|---|
-| `vocab` | `{en, es, ejemplo, ipa}` — una nota genera **dos** tarjetas (`direccion: en-es` y `es-en`) |
-| `gramatica` | `{frase, solucion, aceptadas[], explicacion}` |
-| `lectura` | `{pasajeId, pregunta, opciones[], correcta}` — el texto vive en el almacén `pasajes` |
-| `speaking` | `{consigna, criterio, objetivo}` |
+**Duplicados de clientes.** Compara contra los clientes del PC y contra los
+capturados en la calle. Sobre 90% de parecido lo marca en rojo como ya
+existente; entre 75% y 90% solo advierte. No bloquea la venta: en la calle
+lo importante es vender, y el PC decide al importar.
 
-En gramática, si tu respuesta no coincide con ninguna aceptada, el modelo decide
-si igual es válida; cuando lo es, se agrega a `aceptadas` y la tarjeta queda
-mejor para la próxima.
+**El código de producto no es único.** QC059 lo comparten los yogures, así
+que la app cruza por código + nombre. El archivo de cierre manda los dos.
 
-En lectura no se guarda audio: el TTS del celular lee el texto cuando lo pides.
+**Cuadre.** El cierre incluye qué se llevó, qué se vendió y qué sobra.
+Es lo que le va a permitir a inQC descontar bien.
 
-### El historial es el activo
+**Acentos.** La PT-210 puede necesitar una tabla de caracteres distinta.
+En Ajustes hay tres opciones y un botón de prueba: imprima y quédese con la
+que saque bien la ñ y las tildes. La opción *Sin acentos* siempre funciona.
 
-`intentos` no se borra nunca. Al generar tarjetas nuevas con *Apuntar a mis
-errores recientes*, se le pasan al modelo tus últimos 20 fallos para que el
-material apunte ahí. Sin ese historial esto es un Anki cualquiera.
+## Falta (siguiente paso)
 
-Exporta el JSON de vez en cuando desde Ajustes: es lo único irrecuperable.
-
-## Lo que falta
-
-- Editar o borrar tarjetas a mano.
-- Gráfica de la carga de repasos que viene (hoy solo hay cifras).
-- Detectar tarjetas quemadas: muchos fallos seguidos y facilidad en 1.3
-  significa que la tarjeta está mal formulada, no que tú no sirvas.
-  Conviene marcarlas y reescribirlas con el modelo.
+La pantalla del PC que lee el `cierre_*.json`: previo de lo que va a entrar,
+clientes nuevos con sus posibles duplicados marcados, y confirmación.
+Idempotente por el UUID de cada venta, así que reimportar el mismo archivo
+no duplica nada.

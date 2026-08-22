@@ -1,512 +1,471 @@
-// app.js — pega todo: sesión, generación, progreso, ajustes.
+/* Ventas en Ruta — Quesos Cerinza
+   App del vendedor: vende, imprime y al final del día manda un archivo al PC. */
+
 import * as db from './db.js';
-import * as srs from './srs.js';
-import * as llm from './llm.js';
-import * as voz from './voz.js';
+import * as impresora from './printer.js';
+import * as ticket from './ticket.js';
+import { Ticket } from './escpos.js';
+import { uuid, pesos, hoyISO, fechaCorta, parecidos, normalizar } from './util.js';
 
-const $ = (s) => document.querySelector(s);
-const el = (t, c, txt) => {
-  const n = document.createElement(t);
-  if (c) n.className = c;
-  if (txt !== undefined) n.textContent = txt;
-  return n;
-};
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
 
-const NOMBRE_TIPO = {
-  vocab: 'Vocabulario', gramatica: 'Gramática',
-  lectura: 'Lectura', speaking: 'Speaking',
-};
+let cfg = {};
+let productos = [];
+let clientesPC = [];
+let carrito = [];          // [{codigo, nombre, precio, cant, subtotal}]
+let clienteActual = null;  // {uuid, nombre, doc, tel, dir, pueblo, dia_ruta, nuevo}
 
-let cola = [];
-let actual = null;
-let limiteSesion = 40;
-
-/* ============ Navegación ============ */
-
-function mostrarVista(nombre) {
-  document.querySelectorAll('.vista').forEach((v) => v.classList.remove('activa'));
-  $(`#vista-${nombre}`).classList.add('activa');
-  document.querySelectorAll('nav button').forEach((b) =>
-    b.classList.toggle('activa', b.dataset.vista === nombre));
-  voz.callar();
-  if (nombre === 'progreso') pintarProgreso();
-  if (nombre === 'repasar' && !actual) iniciarSesion();
+/* ================= Avisos ================= */
+function aviso(txt, tipo = 'ok') {
+  const caja = $('#aviso');
+  caja.textContent = txt;
+  caja.className = 'aviso ' + tipo;
+  caja.hidden = false;
+  clearTimeout(aviso._t);
+  aviso._t = setTimeout(() => { caja.hidden = true; }, 4500);
 }
 
-document.querySelectorAll('nav button').forEach((b) =>
-  b.addEventListener('click', () => mostrarVista(b.dataset.vista)));
-
-/* ============ Sesión de repaso ============ */
-
-async function iniciarSesion() {
-  const pendientes = await db.vencidas(limiteSesion);
-  cola = pendientes;
-  actualizarContador();
-  siguiente();
+/* ================= Navegación ================= */
+function ir(pantalla) {
+  $$('.pantalla').forEach(p => p.hidden = p.dataset.pantalla !== pantalla);
+  $$('.nav button').forEach(b => b.classList.toggle('activo', b.dataset.ir === pantalla));
+  window.scrollTo(0, 0);
+  if (pantalla === 'dia') pintarDia();
+  if (pantalla === 'carga') pintarCarga();
 }
 
-function actualizarContador() {
-  const n = cola.length + (actual ? 1 : 0);
-  $('#contador').textContent = n ? `${n} pendiente${n === 1 ? '' : 's'}` : 'al día';
-}
+/* ================= Estado de la impresora ================= */
+impresora.alCambiar(e => {
+  const luz = $('#luzImpresora'), txt = $('#estadoImpresora');
+  luz.className = 'luz' + (e.conectada ? ' on' : '');
+  txt.textContent = e.conectada ? (e.nombre || 'Impresora lista') : 'Impresora sin conectar';
+  $('#btnConectar').textContent = e.conectada ? 'Reconectar' : 'Conectar impresora';
+});
 
-function siguiente() {
-  actual = cola.shift() || null;
-  actualizarContador();
-  if (!actual) return pintarVacio();
-  pintarTarjeta(actual);
-}
-
-function pintarVacio() {
-  const c = $('#sesion');
-  c.innerHTML = '';
-  const v = el('div', 'vacio');
-  v.appendChild(el('strong', null, 'No hay nada vencido'));
-  v.appendChild(el('p', null, 'El repaso espaciado funciona porque respeta el descanso. Vuelve mañana, o crea tarjetas nuevas.'));
-  const b = el('button', 'principal', 'Crear tarjetas');
-  b.addEventListener('click', () => mostrarVista('agregar'));
-  v.appendChild(b);
-  c.appendChild(v);
-}
-
-function marcoTarjeta(tipo, extra) {
-  const t = el('div', 'tarjeta');
-  t.dataset.tipo = tipo;
-  const e = el('div', 'etiqueta');
-  e.appendChild(el('span', null, NOMBRE_TIPO[tipo]));
-  e.appendChild(el('span', null, extra || ''));
-  t.appendChild(e);
-  return t;
-}
-
-function pintarTarjeta({ tarjeta, prog }) {
-  const c = $('#sesion');
-  c.innerHTML = '';
-  const veces = prog.repeticiones ? `visto ${prog.repeticiones}×` : 'nueva';
-  const marco = marcoTarjeta(tarjeta.tipo, veces);
-  c.appendChild(marco);
-  ({ vocab: pintarVocab, gramatica: pintarGramatica, lectura: pintarLectura, speaking: pintarSpeaking })
-    [tarjeta.tipo](marco, c, tarjeta);
-}
-
-function filaNotas(contenedor, alCalificar) {
-  const f = el('div', 'notas');
-  srs.NOTAS.forEach((n) => {
-    const b = el('button', null, n.texto);
-    b.dataset.clave = n.clave;
-    b.addEventListener('click', () => alCalificar(n.valor));
-    f.appendChild(b);
-  });
-  contenedor.appendChild(f);
-}
-
-// La regla: muestra dónde quedó la tarjeta en la escala de intervalos.
-function mostrarRegla(contenedor, intervalo) {
-  const r = el('div', 'regla');
-  srs.HITOS.forEach((h) => {
-    const hito = el('div', 'hito', srs.textoIntervalo(h).replace(' días', 'd').replace(' día', 'd').replace(' meses', 'm'));
-    hito.style.left = `${srs.posicionEnRegla(h) * 100}%`;
-    r.appendChild(hito);
-  });
-  const m = el('div', 'marcador');
-  m.dataset.texto = srs.textoIntervalo(intervalo);
-  m.style.left = '0%';
-  r.appendChild(m);
-  contenedor.appendChild(r);
-  requestAnimationFrame(() => { m.style.left = `${srs.posicionEnRegla(intervalo) * 100}%`; });
-}
-
-async function calificar(nota, respuesta = null, correccion = null) {
-  const { tarjeta, prog } = actual;
-  const nuevo = srs.calificar(prog, nota);
-  await db.poner('programacion', nuevo);
-  await db.registrarIntento({
-    tarjetaId: tarjeta.id, fecha: Date.now(), nota, respuesta, correccion,
-  });
-
-  if (nota < 3) {
-    cola.push({ tarjeta, prog: nuevo });   // vuelve al final de esta misma sesión
-    siguiente();
-    return;
-  }
-
-  const c = $('#sesion');
-  c.innerHTML = '';
-  const marco = marcoTarjeta(tarjeta.tipo, 'programada');
-  marco.appendChild(el('p', 'anverso', srs.textoIntervalo(nuevo.intervalo)));
-  marco.appendChild(el('p', 'pista', `Facilidad ${nuevo.facilidad.toFixed(2)} · ${nuevo.repeticiones} repasos seguidos`));
-  mostrarRegla(marco, nuevo.intervalo);
-  c.appendChild(marco);
-  const b = el('button', 'principal', 'Siguiente');
-  b.addEventListener('click', siguiente);
-  c.appendChild(b);
-  b.focus();
-}
-
-/* ---- vocab ---- */
-function pintarVocab(marco, c, tarjeta) {
-  const { en, es, ejemplo, ipa } = tarjeta.carga;
-  const haciaEs = tarjeta.direccion === 'en-es';
-  const frente = el('p', `anverso ${haciaEs ? 'en' : 'es'}`, haciaEs ? en : es);
-  marco.appendChild(frente);
-  if (haciaEs && ipa) marco.appendChild(el('span', 'ipa', ipa));
-
-  const b = el('button', 'principal', 'Ver respuesta');
-  c.appendChild(b);
-  b.addEventListener('click', () => {
-    b.remove();
-    const r = el('div', 'reverso');
-    r.appendChild(el('p', `anverso ${haciaEs ? 'es' : 'en'}`, haciaEs ? es : en));
-    if (ejemplo) r.appendChild(el('p', 'ejemplo', ejemplo));
-    if (voz.hayVoz()) {
-      const bv = el('button', null, '▶ Escuchar');
-      bv.style.marginTop = '12px';
-      bv.addEventListener('click', () => voz.decir(ejemplo || en));
-      r.appendChild(bv);
-    }
-    marco.appendChild(r);
-    filaNotas(c, (n) => calificar(n));
-  });
-}
-
-/* ---- gramatica ---- */
-function pintarGramatica(marco, c, tarjeta) {
-  const { frase, solucion, aceptadas = [], explicacion } = tarjeta.carga;
-  marco.appendChild(el('p', 'anverso en', frase));
-  const campo = el('input');
-  campo.placeholder = 'Completa el espacio';
-  campo.autocapitalize = 'none';
-  campo.style.marginTop = '16px';
-  marco.appendChild(campo);
-
-  const b = el('button', 'principal', 'Revisar');
-  c.appendChild(b);
-
-  const normal = (s) => (s || '').toLowerCase().trim()
-    .replace(/[’´`]/g, "'").replace(/\s+/g, ' ').replace(/[.,;!?]$/, '');
-
-  b.addEventListener('click', async () => {
-    const dada = campo.value;
-    campo.disabled = true;
-    b.remove();
-    const validas = [solucion, ...aceptadas].map(normal);
-    let acierto = validas.includes(normal(dada));
-    const r = el('div', 'reverso');
-
-    if (!acierto && dada.trim()) {
-      const cargando = el('p', 'cargando', 'Revisando si tu versión también sirve…');
-      r.appendChild(cargando);
-      marco.appendChild(r);
-      try {
-        const v = await llm.esValida(frase, solucion, dada);
-        cargando.remove();
-        if (v.valida) {
-          acierto = true;
-          tarjeta.carga.aceptadas = [...aceptadas, dada.trim()];
-          await db.poner('tarjetas', tarjeta);
-          r.appendChild(el('div', 'aviso ok', `También es válida: ${v.nota}`));
-        } else if (v.nota) {
-          r.appendChild(el('div', 'aviso', v.nota));
-        }
-      } catch (e) {
-        cargando.textContent = `No se pudo consultar: ${e.message}`;
-      }
-    } else {
-      marco.appendChild(r);
-    }
-
-    r.appendChild(el('p', 'anverso en', solucion));
-    if (aceptadas.length) r.appendChild(el('p', 'pista', `También: ${aceptadas.join(', ')}`));
-    if (explicacion) r.appendChild(el('p', 'ejemplo', explicacion));
-    r.insertBefore(el('div', acierto ? 'aviso ok' : 'aviso', acierto ? 'Correcto' : `Tu respuesta: ${dada || '(vacía)'}`), r.firstChild);
-
-    if (acierto) filaNotas(c, (n) => calificar(n, dada));
-    else calificarConBoton(c, dada);
-  });
-}
-
-function calificarConBoton(c, respuesta) {
-  const b = el('button', 'principal', 'Continuar');
-  b.addEventListener('click', () => calificar(1, respuesta));
-  c.appendChild(b);
-}
-
-/* ---- lectura ---- */
-async function pintarLectura(marco, c, tarjeta) {
-  const { pasajeId, pregunta, opciones, correcta } = tarjeta.carga;
-  const pasaje = await db.obtener('pasajes', pasajeId);
-
-  if (pasaje) {
-    const p = el('div', 'pasaje');
-    p.appendChild(el('h4', null, pasaje.titulo || ''));
-    p.appendChild(el('p', null, pasaje.texto));
-    marco.appendChild(p);
-    if (voz.hayVoz()) {
-      const bv = el('button', null, '▶ Escuchar el texto');
-      bv.addEventListener('click', () => voz.decir(pasaje.texto, 0.9));
-      marco.appendChild(bv);
-    }
-  }
-
-  marco.appendChild(el('p', 'anverso en', pregunta));
-  const caja = el('div', 'opciones');
-  caja.style.marginTop = '14px';
-  marco.appendChild(caja);
-
-  opciones.forEach((o, i) => {
-    const b = el('button', null, o);
-    b.addEventListener('click', () => {
-      [...caja.children].forEach((x) => { x.disabled = true; });
-      const bien = i === correcta;
-      b.classList.add(bien ? 'correcta' : 'errada');
-      if (!bien) caja.children[correcta].classList.add('correcta');
-      if (bien) filaNotas(c, (n) => calificar(n, o));
-      else calificarConBoton(c, o);
-    });
-    caja.appendChild(b);
-  });
-}
-
-/* ---- speaking ---- */
-function pintarSpeaking(marco, c, tarjeta) {
-  const { consigna, criterio, objetivo } = tarjeta.carga;
-  marco.appendChild(el('p', 'anverso es', consigna));
-  if (objetivo) marco.appendChild(el('p', 'pista', `Debe aparecer: ${objetivo}`));
-
-  const trans = el('div', 'transcripcion');
-  marco.appendChild(trans);
-
-  if (!voz.hayMicrofono()) {
-    marco.appendChild(el('div', 'aviso', 'Este navegador no reconoce voz. Escribe lo que dirías.'));
-    const campo = el('textarea');
-    campo.rows = 3;
-    marco.appendChild(campo);
-    const b = el('button', 'principal', 'Evaluar');
-    b.addEventListener('click', () => evaluarHabla(c, marco, tarjeta, campo.value));
-    c.appendChild(b);
-    return;
-  }
-
-  let sesionVoz = null;
-  const bGrabar = el('button', 'principal', '● Hablar');
-  c.appendChild(bGrabar);
-
-  bGrabar.addEventListener('click', () => {
-    if (sesionVoz) {
-      sesionVoz.detener();
-      sesionVoz = null;
-      bGrabar.textContent = '● Hablar';
-      bGrabar.classList.remove('grabando');
-      return;
-    }
-    trans.textContent = '';
-    bGrabar.textContent = '■ Detener';
-    bGrabar.classList.add('grabando');
-    sesionVoz = voz.escuchar({
-      alParcial: (t) => { trans.textContent = t; },
-      alFinal: (t) => {
-        sesionVoz = null;
-        bGrabar.classList.remove('grabando');
-        bGrabar.remove();
-        evaluarHabla(c, marco, tarjeta, t || trans.textContent);
-      },
-      alError: (m) => { marco.appendChild(el('div', 'aviso', m)); },
-    });
-  });
-}
-
-async function evaluarHabla(c, marco, tarjeta, texto) {
-  if (!texto || !texto.trim()) {
-    marco.appendChild(el('div', 'aviso', 'No se captó nada. Intenta otra vez.'));
-    return calificarConBoton(c, '');
-  }
-  c.innerHTML = '';
-  const cargando = el('p', 'cargando', 'Evaluando lo que dijiste…');
-  marco.appendChild(cargando);
-  const { consigna, criterio, objetivo } = tarjeta.carga;
+$('#btnConectar').addEventListener('click', async () => {
   try {
-    const r = await llm.calificarHabla(consigna, criterio, objetivo, texto);
-    cargando.remove();
-    const rev = el('div', 'reverso');
-    rev.appendChild(el('div', r.nota >= 3 ? 'aviso ok' : 'aviso', `Nota ${r.nota} de 5`));
-    rev.appendChild(el('p', 'anverso en', r.correccion));
-    if (r.comentario) rev.appendChild(el('p', 'ejemplo', r.comentario));
-    if (voz.hayVoz()) {
-      const bv = el('button', null, '▶ Escuchar la corrección');
-      bv.style.marginTop = '12px';
-      bv.addEventListener('click', () => voz.decir(r.correccion));
-      rev.appendChild(bv);
-    }
-    marco.appendChild(rev);
-    const b = el('button', 'principal', 'Continuar');
-    b.addEventListener('click', () => calificar(r.nota, texto, r.correccion));
-    c.appendChild(b);
+    const n = await impresora.conectar();
+    aviso('Conectada: ' + n);
   } catch (e) {
-    cargando.remove();
-    marco.appendChild(el('div', 'aviso', `No se pudo evaluar: ${e.message}`));
-    calificarConBoton(c, texto);
-  }
-}
-
-/* ============ Generar tarjetas ============ */
-
-async function guardarGeneradas(tipo, datos) {
-  const tarjetas = [];
-  const programaciones = [];
-  const nueva = (carga, extra = {}) => {
-    const t = { id: db.uuid(), tipo, carga, creada: Date.now(), origen: 'modelo', ...extra };
-    tarjetas.push(t);
-    programaciones.push(srs.programacionInicial(t.id));
-    return t;
-  };
-
-  if (tipo === 'vocab') {
-    datos.forEach((d) => {
-      const notaId = db.uuid();          // una nota, dos tarjetas
-      nueva(d, { notaId, direccion: 'en-es' });
-      nueva(d, { notaId, direccion: 'es-en' });
-    });
-  } else if (tipo === 'lectura') {
-    const pasaje = { id: db.uuid(), ...datos.pasaje };
-    await db.poner('pasajes', pasaje);
-    datos.preguntas.forEach((p) => nueva({ pasajeId: pasaje.id, ...p }));
-  } else {
-    datos.forEach((d) => nueva(d));
-  }
-
-  await db.ponerVarios('tarjetas', tarjetas);
-  await db.ponerVarios('programacion', programaciones);
-  return tarjetas.length;
-}
-
-$('#btnGenerar').addEventListener('click', async () => {
-  const salida = $('#resultadoGenerar');
-  const tipo = $('#tipo').value;
-  salida.innerHTML = '';
-  salida.appendChild(el('p', 'cargando', 'Generando…'));
-  try {
-    const fallos = $('#usarFallos').checked ? await db.ultimosFallos(20) : [];
-    const datos = await llm.generar(tipo, +$('#cantidad').value, $('#nivel').value, $('#tema').value.trim(), fallos);
-    const n = await guardarGeneradas(tipo, datos);
-    salida.innerHTML = '';
-    salida.appendChild(el('div', 'aviso ok', `Listo: ${n} tarjeta${n === 1 ? '' : 's'} agregada${n === 1 ? '' : 's'}.`));
-    const b = el('button', 'principal', 'Repasar ahora');
-    b.addEventListener('click', () => mostrarVista('repasar'));
-    salida.appendChild(b);
-    actual = null;
-    await refrescarContador();
-  } catch (e) {
-    salida.innerHTML = '';
-    salida.appendChild(el('div', 'aviso', e.message));
+    if (e.name === 'NotFoundError') return;
+    aviso(String(e.message).includes('No Services matching')
+      ? 'Aparece pero no expone el servicio BLE. Esa unidad es Bluetooth clásico.'
+      : 'No se pudo conectar: ' + e.message, 'mal');
   }
 });
 
-/* ============ Progreso ============ */
-
-async function pintarProgreso() {
-  const [tarjetas, prog, intentos] = await Promise.all([
-    db.todos('tarjetas'), db.todos('programacion'), db.todos('intentos'),
-  ]);
-  const h = db.hoy();
-  const deHoy = intentos.filter((i) => i.fecha >= h);
-  const aciertos = deHoy.filter((i) => i.nota >= 3).length;
-  const maduras = prog.filter((p) => p.intervalo >= 21).length;
-
-  const cifras = [
-    [tarjetas.length, 'tarjetas'],
-    [prog.filter((p) => p.vence <= h).length, 'vencidas hoy'],
-    [deHoy.length ? `${Math.round((aciertos / deHoy.length) * 100)}%` : '—', 'acierto hoy'],
-    [maduras, 'ya asentadas'],
-  ];
-  const c = $('#cifras');
-  c.innerHTML = '';
-  cifras.forEach(([v, t]) => {
-    const d = el('div', 'cifra');
-    d.appendChild(el('b', null, String(v)));
-    d.appendChild(el('span', null, t));
-    c.appendChild(d);
-  });
-
-  const porTipo = {};
-  tarjetas.forEach((t) => { porTipo[t.tipo] = (porTipo[t.tipo] || 0) + 1; });
-  const p = $('#porTipo');
-  p.innerHTML = '';
-  Object.entries(NOMBRE_TIPO).forEach(([k, nombre]) => {
-    const fila = el('div', 'etiqueta');
-    fila.style.borderBottom = '1px solid var(--linea)';
-    fila.style.padding = '10px 0';
-    fila.appendChild(el('span', null, nombre));
-    fila.appendChild(el('span', null, String(porTipo[k] || 0)));
-    p.appendChild(fila);
-  });
+/* ================= Cliente ================= */
+function limpiarCliente() {
+  clienteActual = null;
+  $('#cliNombre').value = '';
+  ['cliDoc', 'cliTel', 'cliDir', 'cliPueblo'].forEach(id => $('#' + id).value = '');
+  $('#cliDia').value = '';
+  $('#parecidos').hidden = true;
+  $('#datosCliente').hidden = true;
 }
 
-/* ============ Ajustes ============ */
+$('#cliNombre').addEventListener('input', () => {
+  const nombre = $('#cliNombre').value.trim();
+  const caja = $('#parecidos');
+  $('#datosCliente').hidden = nombre.length < 3;
 
-async function cargarAjustes() {
-  $('#apiKey').value = await db.leerConfig('apiKey', '');
-  $('#modelo').value = await db.leerConfig('modelo', 'claude-sonnet-5');
-  limiteSesion = await db.leerConfig('limite', 40);
-  $('#limite').value = limiteSesion;
+  if (nombre.length < 3) { caja.hidden = true; return; }
+
+  const nuevosHoy = window.__clientesNuevos || [];
+  const lista = [...clientesPC.map(c => c.nombre), ...nuevosHoy.map(c => c.nombre)];
+  const encontrados = parecidos(nombre, lista);
+
+  if (!encontrados.length) { caja.hidden = true; return; }
+
+  const casiIgual = encontrados.find(p => p.score >= 0.9);
+  caja.hidden = false;
+  caja.className = 'parecidos ' + (casiIgual ? 'bloquea' : 'advierte');
+  caja.innerHTML =
+    `<strong>${casiIgual ? 'Ya existe un cliente así' : 'Se parece a estos clientes'}</strong>` +
+    encontrados.map(p =>
+      `<div class="par"><span>${p.nombre}</span><span class="pct">${Math.round(p.score * 100)}%</span></div>`
+    ).join('') +
+    (casiIgual
+      ? '<div class="nota">Si es el mismo, no lo registre otra vez: la venta se le carga al que ya existe desde el PC.</div>'
+      : '<div class="nota">Si es otro cliente distinto, continúe normal.</div>');
+});
+
+function tomarCliente() {
+  const nombre = $('#cliNombre').value.trim();
+  if (!nombre) return null;
+  const lista = [...clientesPC.map(c => c.nombre), ...(window.__clientesNuevos || []).map(c => c.nombre)];
+  const bloqueado = parecidos(nombre, lista).some(p => p.score >= 0.9);
+  return {
+    uuid: uuid(),
+    nombre,
+    doc: $('#cliDoc').value.trim(),
+    tel: $('#cliTel').value.trim(),
+    dir: $('#cliDir').value.trim(),
+    pueblo: $('#cliPueblo').value.trim(),
+    dia_ruta: $('#cliDia').value,
+    posible_duplicado: bloqueado
+  };
+}
+
+/* ================= Carrito ================= */
+function pintarBuscador(filtro = '') {
+  const f = normalizar(filtro);
+  const lista = f
+    ? productos.filter(p => normalizar(p.nombre).includes(f) || (p.codigo || '').includes(filtro.toUpperCase()))
+    : productos;
+  $('#listaProductos').innerHTML = lista.slice(0, 40).map(p => `
+    <button class="prod" data-id="${p.id}">
+      <span class="pnombre">${p.nombre}</span>
+      <span class="pprecio">$${pesos(p.precio)}</span>
+    </button>`).join('') || '<p class="vacio">No hay productos. Cargue la semilla en Ajustes.</p>';
+}
+
+$('#buscarProducto').addEventListener('input', e => pintarBuscador(e.target.value));
+
+$('#listaProductos').addEventListener('click', e => {
+  const btn = e.target.closest('.prod');
+  if (!btn) return;
+  agregar(btn.dataset.id);
+});
+
+function agregar(id) {
+  const p = productos.find(x => x.id === id);
+  if (!p) return;
+  const ya = carrito.find(x => x.id === id);
+  if (ya) ya.cant += 1;
+  else carrito.push({ id: p.id, codigo: p.codigo, nombre: p.nombre, precio: Number(p.precio) || 0, cant: 1 });
+  pintarCarrito();
+}
+
+function pintarCarrito() {
+  carrito.forEach(i => i.subtotal = i.cant * i.precio);
+  const total = carrito.reduce((s, i) => s + i.subtotal, 0);
+
+  $('#carrito').innerHTML = carrito.length ? carrito.map((i, n) => `
+    <div class="item">
+      <div class="inombre">${i.nombre}</div>
+      <div class="ictrl">
+        <button class="menos" data-n="${n}">−</button>
+        <input class="icant" type="number" inputmode="numeric" min="0" value="${i.cant}" data-n="${n}">
+        <button class="mas" data-n="${n}">+</button>
+        <span class="isub">$${pesos(i.subtotal)}</span>
+      </div>
+      <div class="iprecio">
+        <label>Precio unit.</label>
+        <input class="ipre" type="number" inputmode="numeric" value="${i.precio}" data-n="${n}">
+      </div>
+    </div>`).join('') : '<p class="vacio">Toque un producto para agregarlo.</p>';
+
+  $('#total').textContent = '$' + pesos(total);
+  $('#btnCobrar').disabled = !carrito.length;
+}
+
+$('#carrito').addEventListener('click', e => {
+  const n = e.target.dataset.n;
+  if (n === undefined) return;
+  if (e.target.classList.contains('mas')) carrito[n].cant += 1;
+  else if (e.target.classList.contains('menos')) carrito[n].cant -= 1;
+  else return;
+  if (carrito[n].cant <= 0) carrito.splice(n, 1);
+  pintarCarrito();
+});
+
+$('#carrito').addEventListener('change', e => {
+  const n = e.target.dataset.n;
+  if (n === undefined) return;
+  if (e.target.classList.contains('icant')) {
+    carrito[n].cant = Math.max(0, Number(e.target.value) || 0);
+    if (!carrito[n].cant) carrito.splice(n, 1);
+  } else if (e.target.classList.contains('ipre')) {
+    carrito[n].precio = Math.max(0, Number(e.target.value) || 0);
+  }
+  pintarCarrito();
+});
+
+/* ================= Guardar e imprimir ================= */
+$('#btnCobrar').addEventListener('click', async () => {
+  if (!cfg.dispositivo) { aviso('Primero ponga el número de celular (M1, M2…) en Ajustes.', 'mal'); return ir('ajustes'); }
+  const cli = tomarCliente();
+  if (!cli) { aviso('Falta el nombre del cliente.', 'mal'); return $('#cliNombre').focus(); }
+  if (!carrito.length) return;
+
+  const ahora = new Date();
+  const venta = {
+    uuid: uuid(),
+    numero: await db.siguienteNumero(),
+    fecha: hoyISO(),
+    hora: ahora.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: false }),
+    creada: ahora.toISOString(),
+    dispositivo: cfg.dispositivo,
+    vendedor: cfg.vendedor,
+    cliente_uuid: cli.uuid,
+    cliente_nombre: cli.nombre,
+    cliente_doc: cli.doc,
+    cliente_tel: cli.tel,
+    cliente_dir: cli.dir,
+    cliente_pueblo: cli.pueblo,
+    cliente_dia_ruta: cli.dia_ruta,
+    cliente_posible_duplicado: cli.posible_duplicado,
+    items: carrito.map(i => ({ ...i })),
+    total: carrito.reduce((s, i) => s + i.subtotal, 0),
+    pago: $('#pago').value,
+    nota: $('#nota').value.trim(),
+    anulada: false
+  };
+
+  await db.guardar('ventas', venta);
+  await db.guardar('clientes_nuevos', {
+    uuid: cli.uuid, nombre: cli.nombre, doc: cli.doc, tel: cli.tel,
+    dir: cli.dir, pueblo: cli.pueblo, dia_ruta: cli.dia_ruta,
+    fecha: venta.fecha, dispositivo: cfg.dispositivo,
+    posible_duplicado: cli.posible_duplicado
+  });
+  window.__clientesNuevos = await db.todos('clientes_nuevos');
+
+  aviso('Guardada ' + venta.numero);
+  try {
+    await impresora.imprimir(ticket.remision(venta, cfg));
+  } catch (e) {
+    aviso('Guardada, pero no se pudo imprimir: ' + e.message, 'mal');
+  }
+
+  carrito = [];
+  limpiarCliente();
+  $('#nota').value = '';
+  $('#buscarProducto').value = '';
+  pintarBuscador();
+  pintarCarrito();
+});
+
+/* ================= Pantalla Día ================= */
+async function pintarDia() {
+  const fecha = hoyISO();
+  const ventas = await db.ventasDe(fecha);
+  const vivas = ventas.filter(v => !v.anulada);
+  const total = vivas.reduce((s, v) => s + v.total, 0);
+  const efectivo = vivas.filter(v => v.pago === 'efectivo').reduce((s, v) => s + v.total, 0);
+
+  $('#resumenDia').innerHTML = `
+    <div class="metrica"><span>${vivas.length}</span><label>Ventas</label></div>
+    <div class="metrica"><span>$${pesos(efectivo)}</span><label>Efectivo</label></div>
+    <div class="metrica"><span>$${pesos(total - efectivo)}</span><label>Pendiente</label></div>
+    <div class="metrica destacada"><span>$${pesos(total)}</span><label>Total</label></div>`;
+
+  $('#listaVentas').innerHTML = ventas.length ? ventas.map(v => `
+    <div class="venta ${v.anulada ? 'anulada' : ''}">
+      <div class="vcab">
+        <strong>${v.numero}</strong>
+        <span>${v.hora}</span>
+        <span class="vtotal">$${pesos(v.total)}</span>
+      </div>
+      <div class="vcli">${v.cliente_nombre}${v.cliente_posible_duplicado ? ' <span class="marca">posible duplicado</span>' : ''}</div>
+      <div class="vpago">${v.pago}${v.anulada ? ' · ANULADA' : ''}</div>
+      <div class="vacc">
+        <button data-reimprimir="${v.uuid}">Reimprimir</button>
+        ${v.anulada ? '' : `<button class="peligro" data-anular="${v.uuid}">Anular</button>`}
+      </div>
+    </div>`).join('') : '<p class="vacio">Todavía no hay ventas hoy.</p>';
+
+  const filas = await db.cuadre(fecha);
+  $('#cuadre').innerHTML = filas.length ? `
+    <table>
+      <tr><th>Producto</th><th>Llevó</th><th>Vendió</th><th>Sobra</th></tr>
+      ${filas.map(f => `<tr class="${f.alerta ? 'alerta' : ''}">
+        <td>${f.nombre}</td><td>${f.cargado}</td><td>${f.vendido}</td><td>${f.sobrante}</td></tr>`).join('')}
+    </table>
+    ${filas.some(f => f.alerta) ? '<p class="nota mal">Hay productos vendidos que no estaban en la carga. Revise antes de cerrar.</p>' : ''}`
+    : '<p class="vacio">No registró la carga del día.</p>';
+}
+
+$('#listaVentas').addEventListener('click', async e => {
+  const re = e.target.dataset.reimprimir, an = e.target.dataset.anular;
+  if (re) {
+    const v = await db.obtener('ventas', re);
+    try { await impresora.imprimir(ticket.remision(v, cfg)); aviso('Reimpresa ' + v.numero); }
+    catch (err) { aviso('No se pudo imprimir: ' + err.message, 'mal'); }
+  }
+  if (an) {
+    const v = await db.obtener('ventas', an);
+    const motivo = prompt(`Anular ${v.numero}. ¿Motivo?`);
+    if (!motivo) return;
+    v.anulada = true; v.motivo_anulacion = motivo;
+    await db.guardar('ventas', v);
+    aviso('Anulada ' + v.numero);
+    pintarDia();
+  }
+});
+
+/* ================= Pantalla Carga ================= */
+async function pintarCarga() {
+  const carga = await db.cargaDe(hoyISO());
+  const mapa = new Map(carga.items.map(i => [i.id, i.cant]));
+  $('#listaCarga').innerHTML = productos.map(p => `
+    <div class="cfila">
+      <span>${p.nombre}</span>
+      <input type="number" inputmode="numeric" min="0" data-id="${p.id}"
+             value="${mapa.get(p.id) || ''}" placeholder="0">
+    </div>`).join('') || '<p class="vacio">Cargue la semilla en Ajustes.</p>';
+}
+
+$('#btnGuardarCarga').addEventListener('click', async () => {
+  const items = $$('#listaCarga input').map(inp => {
+    const p = productos.find(x => x.id === inp.dataset.id);
+    return { id: inp.dataset.id, codigo: p?.codigo || '', nombre: p?.nombre || inp.dataset.id, cant: Number(inp.value) || 0 };
+  }).filter(i => i.cant > 0);
+  await db.guardar('carga', { fecha: hoyISO(), items });
+  aviso(`Carga guardada: ${items.length} productos.`);
+});
+
+/* ================= Cierre y envío ================= */
+async function armarCierre() {
+  const fecha = hoyISO();
+  const ventas = await db.ventasDe(fecha);
+  const vivas = ventas.filter(v => !v.anulada);
+  const nuevos = (await db.todos('clientes_nuevos')).filter(c => c.fecha === fecha);
+  const carga = await db.cargaDe(fecha);
+  const filas = await db.cuadre(fecha);
+
+  const total = vivas.reduce((s, v) => s + v.total, 0);
+  const efectivo = vivas.filter(v => v.pago === 'efectivo').reduce((s, v) => s + v.total, 0);
+
+  return {
+    formato: 'cerinza-movil-v1',
+    dispositivo: cfg.dispositivo,
+    vendedor: cfg.vendedor,
+    fecha,
+    generado: new Date().toISOString(),
+    carga: carga.items,
+    ventas,                    // incluye las anuladas, con su motivo
+    clientes_nuevos: nuevos,
+    cuadre: filas,
+    resumen: {
+      fecha,
+      num_ventas: vivas.length,
+      clientes_nuevos: nuevos.length,
+      total, efectivo,
+      pendiente: total - efectivo,
+      cuadre: filas
+    }
+  };
+}
+
+$('#btnCerrar').addEventListener('click', async () => {
+  if (!cfg.dispositivo) { aviso('Falta el número de celular en Ajustes.', 'mal'); return ir('ajustes'); }
+  const datos = await armarCierre();
+  if (!datos.ventas.length && !datos.carga.length) { aviso('No hay nada que enviar todavía.', 'mal'); return; }
+
+  const nombre = `cierre_${cfg.dispositivo}_${datos.fecha}.json`;
+  const blob = new Blob([JSON.stringify(datos, null, 1)], { type: 'application/json' });
+  const archivo = new File([blob], nombre, { type: 'application/json' });
+
+  try {
+    if (navigator.canShare?.({ files: [archivo] })) {
+      await navigator.share({
+        files: [archivo],
+        title: 'Cierre ' + cfg.dispositivo,
+        text: `Cierre ${fechaCorta(datos.fecha)} · ${datos.resumen.num_ventas} ventas · $${pesos(datos.resumen.total)}`
+      });
+      aviso('Enviado.');
+    } else {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = nombre;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      aviso('Se descargó ' + nombre + '. Adjúntelo por WhatsApp.');
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') aviso('No se pudo compartir: ' + e.message, 'mal');
+  }
+});
+
+$('#btnImprimirCierre').addEventListener('click', async () => {
+  const datos = await armarCierre();
+  try { await impresora.imprimir(ticket.cierre(datos.resumen, cfg)); }
+  catch (e) { aviso('No se pudo imprimir: ' + e.message, 'mal'); }
+});
+
+/* ================= Ajustes ================= */
+async function pintarAjustes() {
+  $('#ajDispositivo').value = cfg.dispositivo || '';
+  $('#ajVendedor').value = cfg.vendedor || '';
+  $('#ajNit').value = cfg.empresa_nit || '';
+  $('#ajTel').value = cfg.empresa_tel || '';
+  $('#ajLugar').value = cfg.empresa_lugar || '';
+  $('#ajCodepage').value = cfg.codepage || '0';
+  $('#infoSemilla').textContent = cfg.seed_fecha
+    ? `${productos.length} productos y ${clientesPC.length} clientes (${new Date(cfg.seed_fecha).toLocaleDateString('es-CO')})`
+    : 'Sin cargar. La app no puede vender sin productos.';
+  $('#infoConsecutivo').textContent = `Próxima remisión: ${cfg.dispositivo || 'M?'}-${String((Number(cfg.consecutivo) || 0) + 1).padStart(3, '0')}`;
 }
 
 $('#btnGuardarAjustes').addEventListener('click', async () => {
-  await db.guardarConfig('apiKey', $('#apiKey').value.trim());
-  await db.guardarConfig('modelo', $('#modelo').value.trim() || 'claude-sonnet-5');
-  limiteSesion = Math.max(5, +$('#limite').value || 40);
-  await db.guardarConfig('limite', limiteSesion);
-  const a = $('#avisoAjustes');
-  a.innerHTML = '';
-  a.appendChild(el('div', 'aviso ok', 'Ajustes guardados.'));
+  await db.ajustar('dispositivo', $('#ajDispositivo').value.trim().toUpperCase());
+  await db.ajustar('vendedor', $('#ajVendedor').value.trim());
+  await db.ajustar('empresa_nit', $('#ajNit').value.trim());
+  await db.ajustar('empresa_tel', $('#ajTel').value.trim());
+  await db.ajustar('empresa_lugar', $('#ajLugar').value.trim());
+  await db.ajustar('codepage', $('#ajCodepage').value);
+  cfg = await db.ajustes();
+  pintarAjustes();
+  aviso('Ajustes guardados.');
 });
 
-$('#btnExportar').addEventListener('click', async () => {
-  const datos = await db.exportarTodo();
-  const url = URL.createObjectURL(new Blob([JSON.stringify(datos)], { type: 'application/json' }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `ingles_${new Date().toISOString().slice(0, 10)}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-});
-
-$('#btnImportar').addEventListener('click', () => $('#archivoImportar').click());
-
-$('#archivoImportar').addEventListener('change', async (e) => {
+$('#archivoSemilla').addEventListener('change', async e => {
   const f = e.target.files[0];
   if (!f) return;
-  const a = $('#avisoAjustes');
-  a.innerHTML = '';
   try {
-    await db.importarTodo(JSON.parse(await f.text()));
-    a.appendChild(el('div', 'aviso ok', 'Datos importados.'));
-    actual = null;
-    await refrescarContador();
+    const datos = JSON.parse(await f.text());
+    const r = await db.cargarSemilla(datos);
+    await recargar();
+    aviso(`Semilla cargada: ${r.productos} productos, ${r.clientes} clientes.`);
   } catch (err) {
-    a.appendChild(el('div', 'aviso', `No se pudo importar: ${err.message}`));
+    aviso('No se pudo leer el archivo: ' + err.message, 'mal');
   }
+  e.target.value = '';
 });
 
-/* ============ Arranque ============ */
+$('#btnProbarAcentos').addEventListener('click', async () => {
+  const t = new Ticket(cfg.codepage);
+  t.linea('PRUEBA DE ACENTOS');
+  t.separador();
+  t.linea('áéíóú ÁÉÍÓÚ');
+  t.linea('ñ Ñ ü Ü');
+  t.linea('Cerinza, Boyacá');
+  t.linea('Corporación Peña');
+  t.linea('¿Cuántos? ¡Listo!');
+  t.linea('Cra 5 # 4-20  $18.000');
+  t.separador();
+  t.linea('Si salen simbolos raros,');
+  t.linea('cambie la tabla y repita.');
+  t.avanzar(4);
+  try { await impresora.imprimir(t.bytes()); }
+  catch (e) { aviso('No se pudo imprimir: ' + e.message, 'mal'); }
+});
 
-async function refrescarContador() {
-  const v = await db.vencidas(999);
-  cola = [];
-  $('#contador').textContent = v.length ? `${v.length} pendientes` : 'al día';
+/* ================= Arranque ================= */
+async function recargar() {
+  cfg = await db.ajustes();
+  productos = (await db.todos('productos')).filter(p => p.activo !== false);
+  clientesPC = await db.todos('clientes_pc');
+  window.__clientesNuevos = await db.todos('clientes_nuevos');
+  const dias = cfg.dias_ruta || ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+  $('#cliDia').innerHTML = '<option value="">Día de ruta sugerido…</option>' +
+    dias.map(d => `<option>${d}</option>`).join('');
+  $('#cabDispositivo').textContent = cfg.dispositivo || 'sin configurar';
+  pintarBuscador();
+  pintarCarrito();
+  pintarAjustes();
 }
 
-async function inicio() {
-  await db.abrir();
-  await cargarAjustes();
-  await iniciarSesion();
-  if (!(await llm.hayClave())) {
-    const a = el('div', 'aviso');
-    a.textContent = 'Pon tu clave de API en Ajustes para generar tarjetas.';
-    $('#sesion').prepend(a);
-  }
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  }
-}
+$$('.nav button').forEach(b => b.addEventListener('click', () => ir(b.dataset.ir)));
 
-inicio();
+recargar().then(() => {
+  if (!cfg.dispositivo) { ir('ajustes'); aviso('Configure el número de este celular para empezar.', 'mal'); }
+  else ir('vender');
+});
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').catch(() => { });
+}

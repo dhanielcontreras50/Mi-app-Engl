@@ -3,102 +3,150 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#e3e5e0">
-<title>Repaso de inglés</title>
-<link rel="manifest" href="manifest.json">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="css/estilo.css">
+<meta name="theme-color" content="#16171A">
+<title>Ventas en Ruta — Quesos Cerinza</title>
+<link rel="manifest" href="./manifest.json">
+<link rel="stylesheet" href="./css/estilo.css">
 </head>
 <body>
 
-<header class="barra">
-  <h1 class="marca">Repaso de <em>inglés</em></h1>
-  <span class="contador" id="contador">—</span>
+<header>
+  <div class="marca">
+    <strong>Ventas en Ruta</strong>
+    <span id="cabDispositivo">sin configurar</span>
+  </div>
+  <div class="impresora">
+    <span class="luz" id="luzImpresora"></span>
+    <span id="estadoImpresora">Impresora sin conectar</span>
+  </div>
 </header>
 
-<main>
+<div id="aviso" class="aviso" hidden></div>
 
-  <!-- ---------- REPASAR ---------- -->
-  <section class="vista activa" id="vista-repasar">
-    <div id="sesion"></div>
-  </section>
+<!-- ============ VENDER ============ -->
+<section class="pantalla" data-pantalla="vender">
 
-  <!-- ---------- AGREGAR ---------- -->
-  <section class="vista" id="vista-agregar">
-    <label for="tipo">Tipo de tarjeta</label>
-    <select id="tipo">
-      <option value="vocab">Vocabulario</option>
-      <option value="gramatica">Gramática</option>
-      <option value="lectura">Lectura y audio</option>
-      <option value="speaking">Speaking</option>
+  <fieldset>
+    <legend>Cliente</legend>
+    <input id="cliNombre" type="text" placeholder="Nombre del negocio o la persona" autocomplete="off">
+    <div id="parecidos" class="parecidos" hidden></div>
+    <div id="datosCliente" hidden>
+      <div class="dos">
+        <div><label for="cliDoc">Cédula o NIT</label><input id="cliDoc" type="text" inputmode="numeric"></div>
+        <div><label for="cliTel">Teléfono</label><input id="cliTel" type="tel" inputmode="tel"></div>
+      </div>
+      <label for="cliDir">Dirección</label>
+      <input id="cliDir" type="text">
+      <div class="dos">
+        <div><label for="cliPueblo">Pueblo</label><input id="cliPueblo" type="text"></div>
+        <div><label for="cliDia">Ruta sugerida</label><select id="cliDia"></select></div>
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Productos</legend>
+    <input id="buscarProducto" type="search" placeholder="Buscar por nombre o código" autocomplete="off">
+    <div id="listaProductos" class="productos"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Venta</legend>
+    <div id="carrito"></div>
+    <div class="totalcaja">
+      <span>Total</span>
+      <strong id="total">$0</strong>
+    </div>
+    <label for="pago">Pago</label>
+    <select id="pago">
+      <option value="efectivo">Efectivo</option>
+      <option value="pendiente">Queda pendiente</option>
+      <option value="consignacion">Consignación</option>
     </select>
+    <label for="nota">Nota (opcional)</label>
+    <input id="nota" type="text" placeholder="Ej: vuelve el jueves">
+  </fieldset>
 
-    <label for="tema">Tema (opcional)</label>
-    <input id="tema" placeholder="trabajo, viajes, phrasal verbs…" autocomplete="off">
+  <button id="btnCobrar" class="primario grande" disabled>Guardar e imprimir</button>
+  <button id="btnConectar">Conectar impresora</button>
+</section>
 
-    <div class="fila">
-      <div>
-        <label for="nivel">Nivel</label>
-        <select id="nivel">
-          <option>A2</option><option selected>B1</option><option>B2</option><option>C1</option>
-        </select>
-      </div>
-      <div>
-        <label for="cantidad">Cantidad</label>
-        <select id="cantidad">
-          <option>3</option><option selected>5</option><option>8</option><option>12</option>
-        </select>
-      </div>
-    </div>
+<!-- ============ DÍA ============ -->
+<section class="pantalla" data-pantalla="dia" hidden>
+  <h2>Hoy</h2>
+  <div id="resumenDia" class="metricas"></div>
 
-    <label><input type="checkbox" id="usarFallos" checked style="width:auto;margin-right:8px">
-      Apuntar a mis errores recientes</label>
+  <fieldset>
+    <legend>Cuadre del producto que llevó</legend>
+    <div id="cuadre"></div>
+  </fieldset>
 
-    <p style="margin:18px 0 10px"><button class="principal" id="btnGenerar">Generar tarjetas</button></p>
-    <div id="resultadoGenerar"></div>
-  </section>
+  <fieldset>
+    <legend>Ventas del día</legend>
+    <div id="listaVentas"></div>
+  </fieldset>
 
-  <!-- ---------- PROGRESO ---------- -->
-  <section class="vista" id="vista-progreso">
-    <div class="cifras" id="cifras"></div>
-    <h3 style="font-family:var(--display);margin:24px 0 8px">Por tipo</h3>
-    <div id="porTipo"></div>
-  </section>
+  <button id="btnCerrar" class="primario grande">Cerrar y enviar al PC</button>
+  <button id="btnImprimirCierre">Imprimir tira de cierre</button>
+</section>
 
-  <!-- ---------- AJUSTES ---------- -->
-  <section class="vista" id="vista-ajustes">
-    <label for="apiKey">Clave de API</label>
-    <input id="apiKey" type="password" placeholder="sk-ant-…" autocomplete="off">
-    <p class="pista">Se guarda solo en este celular, dentro de la app. Nunca va al repositorio.</p>
+<!-- ============ CARGA ============ -->
+<section class="pantalla" data-pantalla="carga" hidden>
+  <h2>Carga del día</h2>
+  <p class="explica">Anote cuánto producto adicional lleva para ofrecer. Con esto la app calcula al final qué se vendió y qué debe regresar al cuarto frío.</p>
+  <div id="listaCarga" class="carga"></div>
+  <button id="btnGuardarCarga" class="primario grande">Guardar carga</button>
+</section>
 
-    <label for="modelo">Modelo</label>
-    <input id="modelo" placeholder="claude-sonnet-5" autocomplete="off">
+<!-- ============ AJUSTES ============ -->
+<section class="pantalla" data-pantalla="ajustes" hidden>
+  <h2>Ajustes</h2>
 
-    <label for="limite">Tarjetas por sesión</label>
-    <input id="limite" type="number" min="5" max="200" step="5">
+  <fieldset>
+    <legend>Este celular</legend>
+    <label for="ajDispositivo">Número del celular (M1, M2, M3)</label>
+    <input id="ajDispositivo" type="text" maxlength="4" placeholder="M1">
+    <label for="ajVendedor">Nombre del vendedor</label>
+    <input id="ajVendedor" type="text">
+    <p class="nota" id="infoConsecutivo"></p>
+  </fieldset>
 
-    <p style="margin:18px 0 10px"><button class="principal" id="btnGuardarAjustes">Guardar ajustes</button></p>
-    <div id="avisoAjustes"></div>
+  <fieldset>
+    <legend>Datos de la empresa</legend>
+    <label for="ajNit">NIT</label><input id="ajNit" type="text">
+    <label for="ajTel">Teléfono</label><input id="ajTel" type="text">
+    <label for="ajLugar">Ubicación</label><input id="ajLugar" type="text">
+  </fieldset>
 
-    <h3 style="font-family:var(--display);margin:28px 0 10px">Copia de seguridad</h3>
-    <div class="fila">
-      <button id="btnExportar">Exportar</button>
-      <button id="btnImportar">Importar</button>
-    </div>
-    <input type="file" id="archivoImportar" accept="application/json" class="oculto">
-    <p class="pista">El historial de intentos es lo que hace útil la app. Expórtalo de vez en cuando.</p>
-  </section>
+  <fieldset>
+    <legend>Productos y clientes</legend>
+    <p class="nota" id="infoSemilla"></p>
+    <label for="archivoSemilla">Cargar archivo generado en el PC</label>
+    <input id="archivoSemilla" type="file" accept=".json,application/json">
+  </fieldset>
 
-</main>
+  <fieldset>
+    <legend>Impresora</legend>
+    <label for="ajCodepage">Tabla de caracteres</label>
+    <select id="ajCodepage">
+      <option value="0">CP437 (probar primero)</option>
+      <option value="2">CP850 Latino</option>
+      <option value="16">Windows-1252</option>
+      <option value="-1">Sin acentos</option>
+    </select>
+    <button id="btnProbarAcentos">Imprimir prueba de acentos</button>
+  </fieldset>
 
-<nav>
-  <button class="activa" data-vista="repasar">Repasar</button>
-  <button data-vista="agregar">Agregar</button>
-  <button data-vista="progreso">Progreso</button>
-  <button data-vista="ajustes">Ajustes</button>
+  <button id="btnGuardarAjustes" class="primario grande">Guardar ajustes</button>
+</section>
+
+<nav class="nav">
+  <button data-ir="vender">Vender</button>
+  <button data-ir="dia">Hoy</button>
+  <button data-ir="carga">Carga</button>
+  <button data-ir="ajustes">Ajustes</button>
 </nav>
 
-<script type="module" src="js/app.js"></script>
+<script type="module" src="./js/app.js"></script>
 </body>
 </html>

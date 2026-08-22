@@ -1,48 +1,34 @@
-// sw.js — cachea el armazón para que la app abra sin datos.
-const CACHE = 'ingles-v1';
-const BASICOS = [
+/* Service worker: la app queda guardada en el celular y abre sin señal. */
+const CACHE = 'cerinza-ruta-v1';
+const ARCHIVOS = [
   './', './index.html', './manifest.json',
   './css/estilo.css',
-  './js/app.js', './js/db.js', './js/srs.js', './js/llm.js', './js/voz.js',
+  './js/app.js', './js/db.js', './js/util.js',
+  './js/escpos.js', './js/printer.js', './js/ticket.js'
 ];
 
-self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(BASICOS)).then(() => self.skipWaiting()));
+self.addEventListener('install', ev => {
+  ev.waitUntil(caches.open(CACHE).then(c => c.addAll(ARCHIVOS)).then(() => self.skipWaiting()));
 });
 
-self.addEventListener('activate', (e) => {
-  e.waitUntil(
+self.addEventListener('activate', ev => {
+  ev.waitUntil(
     caches.keys()
-      .then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
 
-self.addEventListener('fetch', (e) => {
-  const url = new URL(e.request.url);
-  if (e.request.method !== 'GET') return;
-  if (url.hostname === 'api.anthropic.com') return;   // nunca cachear el modelo
-
-  // Tipografías: se guardan la primera vez y luego salen del cache.
-  if (url.hostname.endsWith('gstatic.com') || url.hostname.endsWith('googleapis.com')) {
-    e.respondWith(
-      caches.match(e.request).then((hit) => hit || fetch(e.request).then((r) => {
-        const copia = r.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, copia));
-        return r;
-      }).catch(() => hit))
-    );
-    return;
-  }
-
-  // Lo propio: cache primero, red como respaldo.
-  e.respondWith(
-    caches.match(e.request).then((hit) => hit || fetch(e.request).then((r) => {
-      if (r.ok && url.origin === location.origin) {
-        const copia = r.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, copia));
-      }
-      return r;
-    }))
+/* Red primero para tener siempre la última versión; si no hay señal, del caché. */
+self.addEventListener('fetch', ev => {
+  if (ev.request.method !== 'GET') return;
+  ev.respondWith(
+    fetch(ev.request)
+      .then(resp => {
+        const copia = resp.clone();
+        caches.open(CACHE).then(c => c.put(ev.request, copia)).catch(() => {});
+        return resp;
+      })
+      .catch(() => caches.match(ev.request).then(r => r || caches.match('./index.html')))
   );
 });
